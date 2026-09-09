@@ -1,0 +1,191 @@
+#!/bin/bash
+# csi-exec - Run an ephemeral command inside an Apptainer container
+# Usage: csi-exec <image> [ -r <req.txt> ] [ -o <output.log> ] -- <command...>
+
+set -euo pipefail
+
+# ============================================
+# Image aliases (short name -> relative path inside IMAGES_DIR)
+# ============================================
+declare -A IMAGE_ALIASES=(
+    [csibase]="base/csibase_1.0"
+    [csitorch]="torch/csitorch_1.0"
+    # Add new aliases here
+)
+
+# ============================================
+# Paths (same as csi-run)
+# ============================================
+IMAGES_DIR="${APPTAINER_IMAGES_DIR:-/media/data/config/apptainer/csi-images}"
+CACHE_BASE="${APPTAINER_CACHE_BASE:-/media/data/config/global_cache}"
+OVERLAY_DIR="${APPTAINER_OVERLAY_DIR:-/tmp}"
+PREFIX="csiexec"
+
+# ============================================
+# Help
+# ============================================
+usage() {
+    echo "Usage: csi-exec <image> [-r <req.txt>] [-o <output.log>] -- <command...>"
+    echo "  image       Image name or alias (csibase, csitorch, ...)"
+    echo "  -r          requirements.txt to install via pip before the command (optional)"
+    echo "  -o          Output log file (optional; if omitted, runs in foreground)"
+    echo "  -- <cmd>    Command to execute"
+    exit 1
+}
+
+# ============================================
+# Parse arguments
+# ============================================
+if [ $# -lt 3 ]; then
+    usage
+fi
+
+IMAGE_INPUT="$1"
+shift
+
+REQ_FILE=""
+OUTPUT_FILE=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -r)
+            REQ_FILE="$2"
+            shift 2
+            ;;
+        -o)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
+USER_CMD="$*"
+if [ -z "$USER_CMD" ]; then
+    echo "Error: no command specified after --"
+    usage
+fi
+
+# Resolve image path
+if [[ -n "${IMAGE_ALIASES[$IMAGE_INPUT]+exists}" ]]; then
+    IMAGE_REL="${IMAGE_ALIASES[$IMAGE_INPUT]}"
+else
+    IMAGE_REL="$IMAGE_INPUT"
+fi
+IMAGE_PATH="${IMAGES_DIR}/${IMAGE_REL}.sif"
+if [ ! -f "$IMAGE_PATH" ]; then
+    echo "Error: Image not found: $IMAGE_PATH"
+    exit 1
+fi
+
+# ============================================
+# Overlay (always ephemeral)
+# ============================================
+OVERLAY_NAME=$(echo "${IMAGE_REL}" | tr '/' '-')
+OVERLAY="${OVERLAY_DIR}/${PREFIX}-${OVERLAY_NAME}-${USER}-$(date +%Y%m%d_%H%M%S)"
+mkdir -p "${OVERLAY}/local"
+mkdir -p "${OVERLAY}/config"
+
+# ============================================
+# Binds (NVIDIA, caches, current directory)
+# ============================================
+NVIDIA_BINDS=()
+for lib in \
+    libcuda.so libcuda.so.1 \
+    libnvidia-ml.so libnvidia-ml.so.1 \
+    libnvidia-ptxjitcompiler.so libnvidia-ptxjitcompiler.so.1 \
+    libnvidia-compiler.so libnvidia-compiler.so.1 \
+    libnvcuvid.so libnvcuvid.so.1 \
+    libnvidia-encode.so libnvidia-encode.so.1 \
+    libnvidia-opticalflow.so libnvidia-opticalflow.so.1 \
+    libnvoptix.so libnvoptix.so.1; do
+    for hostdir in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+        if [ -f "${hostdir}/${lib}" ] || [ -L "${hostdir}/${lib}" ]; then
+            NVIDIA_BINDS+=(--bind "${hostdir}/${lib}:/usr/lib/x86_64-linux-gnu/${lib}")
+            NVIDIA_BINDS+=(--bind "${hostdir}/${lib}:/lib/x86_64-linux-gnu/${lib}")
+            break
+        fi
+    done
+done
+[ -f /usr/bin/nvidia-smi ] && NVIDIA_BINDS+=(--bind /usr/bin/nvidia-smi:/usr/bin/nvidia-smi)
+
+CACHE_BINDS=(
+    --bind /media:/media
+    --bind "${OVERLAY}/local:${HOME}/.local"
+    --bind "${OVERLAY}/config:${HOME}/.config"
+    --bind "${CACHE_BASE}/pip:${HOME}/.cache/pip"
+    --bind "${CACHE_BASE}/huggingface:${HOME}/.cache/huggingface"
+    --bind "${CACHE_BASE}/matplotlib:${HOME}/.cache/matplotlib"
+    --bind "${CACHE_BASE}/torch:${HOME}/.cache/torch"
+    --bind "${CACHE_BASE}/keras:${HOME}/.cache/keras"
+    --bind "${CACHE_BASE}/cupy:${HOME}/.cache/cupy"
+    --bind "${CACHE_BASE}/jax:${HOME}/.cache/jax"
+    --bind "${CACHE_BASE}/nv:${HOME}/.cache/nv"
+)
+
+# Bind current directory so relative paths work
+PWD_BIND=(--bind "$PWD:$PWD" --pwd "$PWD")
+
+# ============================================
+# Build command to run inside container
+# ============================================
+INSTALL_CMD=""
+if [ -n "$REQ_FILE" ]; then
+    INSTALL_CMD="pip install --user -r \"$REQ_FILE\" &&"
+fi
+
+FULL_CMD="${INSTALL_CMD} ${USER_CMD}"
+
+# ============================================
+# Launch container
+# ============================================
+cleanup() {
+    rm -rf "$OVERLAY"
+}
+
+if [ -n "$OUTPUT_FILE" ]; then
+    # Background mode (detached)
+    echo "Launching job in background..."
+    echo "Output will be written to: $OUTPUT_FILE"
+
+    (
+        exec > "$OUTPUT_FILE" 2>&1
+        echo "Job started at $(date)"
+        echo "Container image: ${IMAGE_REL}"
+        echo "Command: ${USER_CMD}"
+        apptainer run \
+            --nv \
+            --overlay "$OVERLAY" \
+            "${NVIDIA_BINDS[@]}" \
+            "${CACHE_BINDS[@]}" \
+            "${PWD_BIND[@]}" \
+            "$IMAGE_PATH" \
+            bash -c "$FULL_CMD"
+        RET=$?
+        echo "Container exited with code $RET at $(date)"
+        cleanup
+    ) &
+    JOB_PID=$!
+    disown $JOB_PID
+    echo "Job PID: $JOB_PID"
+    echo "Monitor with: tail -f $OUTPUT_FILE"
+else
+    # Foreground mode (terminal stays attached)
+    trap cleanup EXIT
+    echo "Running in foreground..."
+    apptainer run \
+        --nv \
+        --overlay "$OVERLAY" \
+        "${NVIDIA_BINDS[@]}" \
+        "${CACHE_BINDS[@]}" \
+        "${PWD_BIND[@]}" \
+        "$IMAGE_PATH" \
+        bash -c "$FULL_CMD"
+    echo "Job finished."
+fi

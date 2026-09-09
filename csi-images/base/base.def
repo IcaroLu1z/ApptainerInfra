@@ -1,0 +1,110 @@
+Bootstrap: docker
+From: nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
+
+%setup
+    # Runs on the HOST before building the container
+    # Copy your project files into the build context
+    # These will be available at ${APPTAINER_ROOTFS}/app during %post
+    
+    # Nothing needed here if we handle files in %files below
+
+%files
+    # Copy files from host to container
+    # Format: <source> <destination>
+    base.def         /app/base.def
+    requirements.in  /app/requirements.in
+    requirements.txt /app/requirements.txt
+    entrypoint.sh    /entrypoint.sh
+    jupyter_start.sh /cbash/jupyter_start.sh
+
+%post
+    # Runs inside the container during build (like RUN in Dockerfile)
+    # All commands here are executed with /bin/sh
+    
+    # Set up environment for the build
+    export HDF5_USE_FILE_LOCKING='FALSE'
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # Update and install system dependencies
+    apt-get update && apt-get install -y \
+        software-properties-common \
+        libhdf5-dev \
+        ffmpeg \
+        libsm6 \
+        libxext6 \
+        build-essential \
+        git \
+        sudo \
+        nano \
+        curl \
+	iproute2 \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update \
+    && apt-get install -y \
+        python3.11 \
+        python3.11-dev \
+        python3.11-distutils \
+    && apt-get install -y \
+        graphviz \
+        libsndfile1 \
+        libavcodec-extra \
+        python3-graph-tool \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+    
+    # Set Python 3.11 as default
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+    
+    # Install pip for Python 3.11
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+    
+    # Upgrade pip and install essential tools
+    python3 -m pip install --upgrade pip setuptools wheel uv
+    
+    # Install Python dependencies if requirements.txt exists
+    if [ -f /app/requirements.txt ]; then
+        pip3 install --no-cache-dir -r /app/requirements.txt
+    fi
+
+    # Make entrypoint executable
+    chmod +x /entrypoint.sh
+    chmod +x /cbash/jupyter_start.sh
+
+    # Cria o arquivo de aliases
+    echo "alias jupstart='source /cbash/jupyter_start.sh'" > /cbash/aliases.sh
+
+    # Garante que será carregado por todo shell interativo
+    echo 'if [ -f /cbash/aliases.sh ]; then source /cbash/aliases.sh; fi' >> /etc/bash.bashrc
+
+%environment
+    # Environment variables available at runtime
+    export HDF5_USE_FILE_LOCKING='FALSE'
+    export DEBIAN_FRONTEND=noninteractive
+
+%runscript
+    # What runs when the container is executed directly
+    # Equivalent to ENTRYPOINT in Dockerfile
+    exec /entrypoint.sh "$@"
+
+%startscript
+    # What runs when the container is started as an instance
+    # Useful if you want persistent services
+    exec /entrypoint.sh "$@"
+
+%labels
+    Author icarovasconcelos@csilab
+    Version 1.0
+    Description "Ambiente base do CSILab com CUDA 12.6.3 e Python 3.11"
+
+%help
+    This is the CSILab base container.
+    
+    To run interactively:
+        Use the "csi <image>" command.
+    
+    To execute a specific command:
+        Use the "csi <image>" command with flag "-- <command>". 
+
+    To see the libraries available (inside the container):
+        pip list

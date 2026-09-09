@@ -1,0 +1,274 @@
+#!/bin/bash
+# csi - Container de uso geral (interativo ou batch)
+# Modo interativo: csi <imagem> [opções]
+# Modo batch:      csi <imagem> [-r req.txt] [-o output.log] -- <comando...>
+
+set -euo pipefail
+
+# ============================================
+# Image aliases
+# ============================================
+declare -A IMAGE_ALIASES=(
+    [csibase]="base/csibase_1.0"
+    [csitorch]="torch/csitorch_1.0"
+    [csitf]="tflow/csitflow_1.0"
+    [csiraps]="rapids/csiraps_1.0"
+    # Adicione novos aliases aqui
+)
+
+# ============================================
+# Configuração de diretórios
+# ============================================
+IMAGES_DIR="${APPTAINER_IMAGES_DIR:-/media/data/config/apptainer/csi-images}"
+CACHE_BASE="${APPTAINER_CACHE_BASE:-/media/data/config/global_cache}"
+OVERLAY_DIR="${APPTAINER_OVERLAY_DIR:-/tmp}"
+
+# Prefixos para overlays
+INTERACTIVE_PREFIX="csiapp"
+BATCH_PREFIX="csiexec"
+
+# ============================================
+# Funções auxiliares
+# ============================================
+usage() {
+    cat <<EOF
+Uso:
+  csi <imagem>                                            # modo interativo (shell)
+  csi <imagem> [-r req.txt] [-o out.log] -- <comando...>  # modo batch
+
+  <imagem>: nome de alias (csibase, csitorch, csitflow, csiraps) ou caminho relativo (base/csibase_1.0)
+  -r | --requirements: Instalar dependências via pip antes do comando.
+  -o | --output: Salvar a saída no arquivo (job em background).
+                 Se omitido, o comando roda em primeiro plano.
+  -h | --help: Imprime o modo de uso.
+EOF
+    exit 1
+}
+
+# Resolve o caminho da imagem .sif
+resolve_image() {
+    local input="$1"
+    if [[ -n "${IMAGE_ALIASES[$input]+exists}" ]]; then
+        echo "${IMAGE_ALIASES[$input]}"
+    else
+        echo "$input"
+    fi
+}
+
+# Monta bind de bibliotecas NVIDIA
+get_nvidia_binds() {
+    local binds=()
+    for lib in \
+        libcuda.so libcuda.so.1 \
+        libnvidia-ml.so libnvidia-ml.so.1 \
+        libnvidia-ptxjitcompiler.so libnvidia-ptxjitcompiler.so.1 \
+        libnvidia-compiler.so libnvidia-compiler.so.1 \
+        libnvcuvid.so libnvcuvid.so.1 \
+        libnvidia-encode.so libnvidia-encode.so.1 \
+        libnvidia-opticalflow.so libnvidia-opticalflow.so.1 \
+        libnvoptix.so libnvoptix.so.1; do
+        for hostdir in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+            if [ -f "${hostdir}/${lib}" ] || [ -L "${hostdir}/${lib}" ]; then
+                binds+=(--bind "${hostdir}/${lib}:/usr/lib/x86_64-linux-gnu/${lib}")
+                binds+=(--bind "${hostdir}/${lib}:/lib/x86_64-linux-gnu/${lib}")
+                break
+            fi
+        done
+    done
+    [ -f /usr/bin/nvidia-smi ] && binds+=(--bind /usr/bin/nvidia-smi:/usr/bin/nvidia-smi)
+    echo "${binds[@]}"
+}
+
+# Monta binds de cache
+get_cache_binds() {
+    local overlay="$1"
+    echo \
+        --bind /media:/media \
+        --bind "${overlay}/local:${HOME}/.local" \
+        --bind "${overlay}/config:${HOME}/.config" \
+        --bind "${CACHE_BASE}/pip:${HOME}/.cache/pip" \
+        --bind "${CACHE_BASE}/huggingface:${HOME}/.cache/huggingface" \
+        --bind "${CACHE_BASE}/matplotlib:${HOME}/.cache/matplotlib" \
+        --bind "${CACHE_BASE}/torch:${HOME}/.cache/torch" \
+        --bind "${CACHE_BASE}/keras:${HOME}/.cache/keras" \
+        --bind "${CACHE_BASE}/cupy:${HOME}/.cache/cupy" \
+        --bind "${CACHE_BASE}/jax:${HOME}/.cache/jax" \
+        --bind "${CACHE_BASE}/nv:${HOME}/.cache/nv"
+}
+
+# ============================================
+# Verifica argumentos iniciais
+# ============================================
+if [ $# -lt 1 ]; then
+    usage
+fi
+
+# Se pedir ajuda, exibe e sai
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    usage
+fi
+
+IMAGE_INPUT="$1"
+shift
+
+REQ_FILE=""
+OUTPUT_FILE=""
+COMMAND=()               # array para o comando
+MODE="interactive"       # até prova em contrário
+
+# Parsing das opções
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -r | --requirements)
+            REQ_FILE="$2"
+            shift 2
+            ;;
+        -o | --output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+	-h|--help)
+            usage
+            ;;
+        --)
+            shift
+            MODE="batch"
+            break
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
+# Coleta o comando (se batch)
+if [ "$MODE" = "batch" ]; then
+    COMMAND=("$@")
+    if [ ${#COMMAND[@]} -eq 0 ]; then
+        echo "Erro: modo batch requer um comando após --"
+        usage
+    fi
+fi
+
+# ============================================
+# Resolve a imagem
+# ============================================
+IMAGE_REL=$(resolve_image "$IMAGE_INPUT")
+IMAGE_PATH="${IMAGES_DIR}/${IMAGE_REL}.sif"
+if [ ! -f "$IMAGE_PATH" ]; then
+    echo "Erro: imagem não encontrada: $IMAGE_PATH"
+    exit 1
+fi
+
+# ============================================
+# Overlay efêmero
+# ============================================
+OVERLAY_NAME=$(echo "${IMAGE_REL}" | tr '/' '-')
+NOW=$(date +%Y%m%d_%H%M%S)
+if [ "$MODE" = "interactive" ]; then
+    OVERLAY="${OVERLAY_DIR}/${INTERACTIVE_PREFIX}-${OVERLAY_NAME}-${USER}-${NOW}"
+else
+    OVERLAY="${OVERLAY_DIR}/${BATCH_PREFIX}-${OVERLAY_NAME}-${USER}-${NOW}"
+fi
+mkdir -p "${OVERLAY}/local" "${OVERLAY}/config"
+
+# ============================================
+# Binds comuns
+# ============================================
+NVIDIA_BINDS=( $(get_nvidia_binds) )
+CACHE_BINDS=( $(get_cache_binds "$OVERLAY") )
+PWD_BIND=( --bind "$PWD:$PWD" --pwd "$PWD" )
+
+# ============================================
+# Limpeza do overlay (trap)
+# ============================================
+cleanup_overlay() {
+    rm -rf "$OVERLAY"
+}
+
+# ============================================
+# MODO INTERATIVO
+# ============================================
+if [ "$MODE" = "interactive" ]; then
+    echo "Iniciando container interativo com imagem ${IMAGE_REL}..."
+
+    # Watchdog para limpeza quando o processo pai morrer
+    PARENT_PID=$$
+    WATCHDOG_PIDFILE="${OVERLAY_DIR}/csi-watcher-${USER}-${PARENT_PID}.pid"
+    systemd-run \
+        --user \
+        --unit="csi-watcher-${USER}-${PARENT_PID}" \
+        --service-type=simple \
+        /media/data/config/apptainer/scripts/csi-watcher \
+            "$PARENT_PID" \
+            "$OVERLAY" \
+            "$WATCHDOG_PIDFILE"
+
+    # Container interativo (entra no runscript)
+    apptainer run \
+        --nv \
+	--overlay "$OVERLAY" \
+	"${NVIDIA_BINDS[@]}" \
+        "${CACHE_BINDS[@]}" \
+        "$IMAGE_PATH"
+
+    # Após sair do container, o overlay é apagado pelo watchdog ou pelo trap
+    trap 'cleanup_overlay' EXIT
+    exit 0
+fi
+
+# ============================================
+# MODO BATCH
+# ============================================
+echo "Modo batch: ${IMAGE_REL}"
+echo "Comando: ${COMMAND[*]}"
+
+# Constrói linha de instalação (se -r)
+PATH_CMD="export PATH=\$HOME/.local/bin:\$PATH"
+INSTALL_CMD=""
+if [ -n "$REQ_FILE" ]; then
+    INSTALL_CMD="pip install --user -r \"$REQ_FILE\" && "
+fi
+FULL_CMD="${PATH_CMD} && ${INSTALL_CMD} ${COMMAND[*]}"
+
+if [ -n "$OUTPUT_FILE" ]; then
+    # Background
+    echo "Job em background. Log: $OUTPUT_FILE"
+
+    (
+	set +e
+        trap 'cleanup_overlay' EXIT
+
+        exec > "$OUTPUT_FILE" 2>&1
+        echo "Job iniciado em $(date)"
+        echo "Imagem: ${IMAGE_REL}"
+        echo "Comando: ${COMMAND[*]}"
+        apptainer exec \
+            --nv \
+	    --overlay "$OVERLAY" \
+	    "${NVIDIA_BINDS[@]}" \
+            "${CACHE_BINDS[@]}" \
+            "${PWD_BIND[@]}" \
+            "$IMAGE_PATH" \
+            bash -c "$FULL_CMD"
+        RET=$?
+        echo "Container terminou com código $RET em $(date)"
+        cleanup_overlay
+    ) &
+    JOB_PID=$!
+    disown $JOB_PID
+    echo "PID do job: $JOB_PID"
+    echo "Monitore com: tail -f $OUTPUT_FILE"
+else
+    # Foreground
+    trap 'cleanup_overlay' EXIT
+    apptainer exec \
+        --nv \
+        --overlay "$OVERLAY" \
+        "${NVIDIA_BINDS[@]}" \
+        "${CACHE_BINDS[@]}" \
+        "${PWD_BIND[@]}" \
+        "$IMAGE_PATH" \
+        bash -c "$FULL_CMD"
+    echo "Job finalizado."
+fi

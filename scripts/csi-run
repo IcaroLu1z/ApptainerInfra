@@ -1,0 +1,116 @@
+#!/bin/bash
+# csi-run - Launch ephemeral CSI Lab container
+# Usage: csi-run [image_name]
+set -euo pipefail
+
+# ============================================
+# Configuration
+# ============================================
+IMAGES_DIR="${APPTAINER_IMAGES_DIR:-/media/data/config/apptainer/csi-images}"
+CACHE_BASE="${APPTAINER_CACHE_BASE:-/media/data/config/global_cache}"
+OVERLAY_DIR="${APPTAINER_OVERLAY_DIR:-/tmp}"
+PREFIX="csiapp"
+# Default image
+IMAGE_NAME="${1:-base/csibase_1.0}"
+IMAGE_PATH="${IMAGES_DIR}/${IMAGE_NAME}.sif"
+
+# Check image exists
+if [ ! -f "$IMAGE_PATH" ]; then
+    echo "Error: Image not found: $IMAGE_PATH"
+    exit 1
+fi
+
+# ============================================
+# Clean up stale overlays from previous sessions
+# ============================================
+find "${OVERLAY_DIR}" -maxdepth 1 -name "${PREFIX}-*-${USER}-*" -type d -mmin +1440 -exec rm -rf {} \; 2>/dev/null
+
+# ============================================
+# Create ephemeral overlay named after user + image
+# ============================================
+OVERLAY_NAME=$(echo "${IMAGE_NAME}" | tr '/' '-')
+OVERLAY="${OVERLAY_DIR}/${PREFIX}-${OVERLAY_NAME}-${USER}-$(date +%Y%m%d_%H%M%S)"
+
+mkdir -p "${OVERLAY}/local"
+mkdir -p "${OVERLAY}/config"
+
+# ============================================
+# Cleanup on exit
+# ============================================
+cleanup() {
+    rm -rf "$OVERLAY"
+}
+trap cleanup EXIT
+
+# ============================================
+# NVIDIA library binds
+# ============================================
+NVIDIA_BINDS=()
+
+# In csi-run, replace the full library list with only the essential symlinks:
+for lib in \
+    libcuda.so libcuda.so.1 \
+    libnvidia-ml.so libnvidia-ml.so.1 \
+    libnvidia-ptxjitcompiler.so libnvidia-ptxjitcompiler.so.1 \
+    libnvidia-compiler.so libnvidia-compiler.so.1 \
+    libnvcuvid.so libnvcuvid.so.1 \
+    libnvidia-encode.so libnvidia-encode.so.1 \
+    libnvidia-opticalflow.so libnvidia-opticalflow.so.1 \
+    libnvoptix.so libnvoptix.so.1; do
+    
+    for hostdir in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+        if [ -f "${hostdir}/${lib}" ] || [ -L "${hostdir}/${lib}" ]; then
+            NVIDIA_BINDS+=(--bind "${hostdir}/${lib}:/usr/lib/x86_64-linux-gnu/${lib}")
+            NVIDIA_BINDS+=(--bind "${hostdir}/${lib}:/lib/x86_64-linux-gnu/${lib}")
+            break
+        fi
+    done
+done
+# Bind nvidia-smi binary
+[ -f /usr/bin/nvidia-smi ] && NVIDIA_BINDS+=(--bind /usr/bin/nvidia-smi:/usr/bin/nvidia-smi)
+
+# ============================================
+# Shared cache binds
+# ============================================
+CACHE_BINDS=(
+    --bind /media:/media
+    --bind "${OVERLAY}/local:${HOME}/.local"
+    --bind "${OVERLAY}/config:${HOME}/.config"
+    --bind "${CACHE_BASE}/pip:${HOME}/.cache/pip"
+    --bind "${CACHE_BASE}/huggingface:${HOME}/.cache/huggingface"
+    --bind "${CACHE_BASE}/matplotlib:${HOME}/.cache/matplotlib"
+    --bind "${CACHE_BASE}/torch:${HOME}/.cache/torch"
+    --bind "${CACHE_BASE}/keras:${HOME}/.cache/keras"
+    --bind "${CACHE_BASE}/cupy:${HOME}/.cache/cupy"
+    --bind "${CACHE_BASE}/jax:${HOME}/.cache/jax"
+    --bind "${CACHE_BASE}/nv:${HOME}/.cache/nv"
+)
+
+# ============================================
+# Launch watchdog in background
+# ============================================
+
+PARENT_PID=$$
+WATCHDOG_PIDFILE="${OVERLAY_DIR}/csi-watcher-${USER}-${PARENT_PID}.pid"
+
+systemd-run \
+    --user \
+    --unit="csi-watcher-${USER}-${PARENT_PID}" \
+    --service-type=simple \
+    /media/data/config/apptainer/scripts/csi-watcher \
+        "$PARENT_PID" \
+        "$OVERLAY" \
+        "$WATCHDOG_PIDFILE" \
+
+# ============================================
+# Launch container
+# ============================================
+apptainer run \
+    --nv \
+    --overlay "$OVERLAY" \
+    "${NVIDIA_BINDS[@]}" \
+    "${CACHE_BINDS[@]}" \
+    "$IMAGE_PATH"
+
+
+

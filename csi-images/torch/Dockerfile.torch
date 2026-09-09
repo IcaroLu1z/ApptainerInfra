@@ -1,0 +1,28 @@
+FROM csibase:0.1
+
+WORKDIR /app
+
+RUN pip3 install torch==2.11.0 \
+                 torchvision==0.25.0 \ 
+                 torchaudio==2.11.0 \
+                 --index-url https://download.pytorch.org/whl/cu126
+
+RUN pip3 install torch_geometric==2.7.0 \
+                 pyg_lib \
+                 torch_scatter==2.1.2+pt211cu126 \
+                 torch_sparse==0.6.18+pt211cu126 \ 
+                 torch_cluster==1.6.3+pt211cu126 \
+                 torch-geometric-temporal==0.56.2 \
+                 -f https://data.pyg.org/whl/torch-2.11.0+cu126.html
+
+RUN pip3 install transformers==4.57.6 \
+                 accelerate==1.13.0 \
+                 timm==1.0.26 \
+	         torchmetrics==1.9.0 \
+                 einops==0.8.2 \
+                 xformers==0.0.35 \
+                 pytorch_lightning==2.6.1 \
+                 vllm==0.19.0
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["bash"]

@@ -1,0 +1,26 @@
+#!/bin/bash
+# csi-watchdog - Watches a parent PID and cleans up overlay on exit
+# Usage: csi-watchdog <parent-pid> <overlay-path> <pidfile-path>
+
+set +e  # Don't exit on errors
+
+PARENT_PID="$1"
+OVERLAY_PATH="$2"
+PIDFILE="$3"
+
+# Save our own PID
+echo $$ > "$PIDFILE"
+
+# Wait for parent to die
+while kill -0 "$PARENT_PID" 2>/dev/null; do
+    sleep 1
+done
+
+# Parent is dead — brief pause for cleanup
+sleep 2
+
+# Remove overlay and our own pid file
+rm -rf "$OVERLAY_PATH" 2>/dev/null
+rm -f "$PIDFILE" 2>/dev/null
+
+exit 0

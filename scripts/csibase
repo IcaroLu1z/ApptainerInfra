@@ -1,0 +1,81 @@
+#!/bin/bash
+# csi-run - Launch ephemeral CSI Lab container
+# Usage: csi-run [image_name]
+
+set -euo pipefail
+
+# ============================================
+# Configuration
+# ============================================
+IMAGES_DIR="${APPTAINER_IMAGES_DIR:-/media/data/config/apptainer/csi-images}"
+CACHE_BASE="${APPTAINER_CACHE_BASE:-/media/data/config/global_cache}"
+OVERLAY_DIR="${APPTAINER_OVERLAY_DIR:-/tmp}"
+
+# Default image
+IMAGE_NAME="${1:-base/csibase_1.0}"
+IMAGE_PATH="${IMAGES_DIR}/${IMAGE_NAME}.sif"
+
+# Check image exists
+if [ ! -f "$IMAGE_PATH" ]; then
+    echo "Error: Image not found: $IMAGE_PATH"
+    exit 1
+fi
+
+# ============================================
+# Create ephemeral overlay named after user
+# ============================================
+OVERLAY_NAME=$(echo "${IMAGE_NAME}" | tr '/' '-')
+OVERLAY="${OVERLAY_DIR}/csi-${OVERLAY_NAME}-${USER}-$(date +%Y%m%d_%H%M%S)"
+	
+mkdir -p "$OVERLAY"
+
+# ============================================
+# Cleanup on exit
+# ============================================
+cleanup() {
+    echo ""
+    echo "Cleaning up ephemeral session..."
+    rm -rf "$OVERLAY"
+}
+trap cleanup EXIT
+
+# ============================================
+# NVIDIA library binds
+# ============================================
+NVIDIA_BINDS=()
+
+for lib in /lib/x86_64-linux-gnu/libnvidia-*; do
+    if [ -f "$lib" ] || [ -L "$lib" ]; then
+        base=$(basename "$lib")
+        NVIDIA_BINDS+=(--bind "${lib}:/lib/x86_64-linux-gnu/${base}")
+        NVIDIA_BINDS+=(--bind "${lib}:/usr/lib/x86_64-linux-gnu/${base}")
+    fi
+done
+
+# Bind nvidia-smi if present
+[ -f /usr/bin/nvidia-smi ] && NVIDIA_BINDS+=(--bind /usr/bin/nvidia-smi:/usr/bin/nvidia-smi)
+
+# ============================================
+# Shared cache binds
+# ============================================
+CACHE_BINDS=(
+    --bind /media:/media
+    --bind "${CACHE_BASE}/pip:${HOME}/.cache/pip"
+    --bind "${CACHE_BASE}/huggingface:${HOME}/.cache/huggingface"
+    --bind "${CACHE_BASE}/matplotlib:${HOME}/.cache/matplotlib"
+    --bind "${CACHE_BASE}/torch:${HOME}/.cache/torch"
+    --bind "${CACHE_BASE}/keras:${HOME}/.cache/keras"
+    --bind "${CACHE_BASE}/cupy:${HOME}/.cache/cupy"
+    --bind "${CACHE_BASE}/jax:${HOME}/.cache/jax"
+    --bind "${CACHE_BASE}/nv:${HOME}/.cache/nv"
+)
+
+# ============================================
+# Launch container
+# ============================================
+apptainer run \
+    --nv \
+    --overlay "$OVERLAY" \
+    "${NVIDIA_BINDS[@]}" \
+    "${CACHE_BINDS[@]}" \
+    "$IMAGE_PATH" 
