@@ -1,0 +1,62 @@
+Bootstrap: localimage
+From: ../base/csibase_1.0.sif
+
+%setup
+    # Runs on the HOST before building the container
+    # Copy your project files into the build context
+    # These will be available at ${APPTAINER_ROOTFS}/app during %post
+    
+    # Nothing needed here if we handle files in %files below
+
+%files
+    # Copy files from host to container
+    # Format: <source> <destination>
+    torch.def       /app/torch.def
+    #req_torch.in    /app/req_torch.in
+    #req_rapids.txt   /app/req_torch.txt
+    entrypoint.sh    /entrypoint.sh
+
+%post
+    apt-get update
+    apt-get install -y build-essential
+
+    pip install --no-cache-dir --upgrade pip
+
+    # Instala PyTorch 2.9 com CUDA 12.6
+    pip install --no-cache-dir torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu126
+
+    # PyG principal
+    pip install --no-cache-dir torch_geometric
+
+    # Extensões opcionais do PyG (scatter, sparse, cluster)
+    pip install --no-cache-dir torch_scatter torch_sparse torch_cluster -f https://data.pyg.org/whl/torch-2.9.0+cu126.html
+
+    pip install --no-cache-dir torch-geometric-temporal
+
+    # Outros pacotes úteis (escolha os que deseja)
+    pip install --no-cache-dir accelerate transformers timm torchmetrics einops pytorch_lightning 
+
+    chmod +x /entrypoint.sh
+
+%environment
+    # Environment variables available at runtime
+    export HDF5_USE_FILE_LOCKING='FALSE'
+    export DEBIAN_FRONTEND=noninteractive
+
+%runscript
+    # What runs when the container is executed directly
+    # Equivalent to ENTRYPOINT in Dockerfile
+    exec /entrypoint.sh "$@"
+
+%startscript
+    # What runs when the container is started as an instance
+    # Useful if you want persistent services
+    exec /entrypoint.sh "$@"
+
+%labels
+    Author icarovasconcelos@csilab
+    Version 1.0
+    Description "Ambiente PyTorch  do CSILab com Python 3.11 e PyTorch>=2.11"
+
+%help
+    This is the CSILab PyTorch container.

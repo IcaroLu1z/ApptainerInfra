@@ -1,0 +1,50 @@
+Bootstrap: localimage
+From: ../base/csibase_1.0.sif
+
+%setup
+    # Runs on the HOST before building the container
+    # Copy your project files into the build context
+    # These will be available at ${APPTAINER_ROOTFS}/app during %post
+    
+    # Nothing needed here if we handle files in %files below
+
+%files
+    # Copy files from host to container
+    # Format: <source> <destination>
+    tflow.def       /app/tflow.def
+    requirements.in    /app/requirements.in
+    requirements.txt    /app/requirements.txt
+    entrypoint.sh    /entrypoint.sh
+
+%post
+    apt-get update
+    apt-get install -y build-essential
+
+        # Upgrade pip and install pinned TensorFlow ecosystem
+    pip install --no-cache-dir --upgrade pip
+    if [ -f /app/requirements.txt ]; then
+        pip3 install --no-cache-dir -r /app/requirements.txt
+    fi
+   
+%environment
+    # Environment variables available at runtime
+    export HDF5_USE_FILE_LOCKING='FALSE'
+    export DEBIAN_FRONTEND=noninteractive
+
+%runscript
+    # What runs when the container is executed directly
+    # Equivalent to ENTRYPOINT in Dockerfile
+    exec /entrypoint.sh "$@"
+
+%startscript
+    # What runs when the container is started as an instance
+    # Useful if you want persistent services
+    exec /entrypoint.sh "$@"
+
+%labels
+    Author icarovasconcelos@csilab
+    Version 1.0
+    Description "Ambiente Tensorflow  do CSILab com Python 3.11 e PyTorch>=2.11"
+
+%help
+    This is the CSILab PyTorch container.

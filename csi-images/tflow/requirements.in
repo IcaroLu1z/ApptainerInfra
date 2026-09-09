@@ -1,0 +1,16 @@
+tensorflow[and-cuda]
+tensorflow-probability
+tensorflow-datasets
+tensorflow-hub
+# Computer Vision & Graph Neural N
+opencv-python-headless
+keras-cv
+spektral
+# Research utilities (as
+tensorflow-addons
+keras-tuner
+tensorflow-model-optimization
+tensorflow-io
+keras-nlp
+mlflow
+pydot

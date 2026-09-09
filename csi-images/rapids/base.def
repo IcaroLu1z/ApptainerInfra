@@ -1,0 +1,63 @@
+Bootstrap: localimage
+From: ../base/csibase_1.0.sif
+
+%setup
+    # Runs on the HOST before building the container
+    # Copy your project files into the build context
+    # These will be available at ${APPTAINER_ROOTFS}/app during %post
+    
+    # Nothing needed here if we handle files in %files below
+
+%files
+    # Copy files from host to container
+    # Format: <source> <destination>
+    rapids.def       /app/rapids.def
+    req_rapids.in    /app/req_rapids.in
+    req_rapids.txt   /app/req_rapids.txt
+    entrypoint.sh    /entrypoint.sh
+
+%post
+    # Runs inside the container during build (like RUN in Dockerfile)
+    # All commands here are executed with /bin/sh
+    apt-get update 
+
+    pip install \
+    --extra-index-url=https://pypi.nvidia.com \
+    "cudf-cu12>=26.02.*" "dask-cudf-cu12>=26.02.*" "cuml-cu12>=26.02.*" \
+    "cugraph-cu12>=26.02.*" "nx-cugraph-cu12>=26.02.*" "cuxfilter-cu12>=26.02.*" \
+    "cucim-cu12>=26.02.*" "pylibraft-cu12>=26.02.*" "raft-dask-cu12>=26.02.*" \
+    "cuvs-cu12>=26.02.*" "nvforest-cu12>=26.02.*" "nx-cugraph-cu12>=26.02.*"
+
+    chmod +x /entrypoint.sh
+
+%environment
+    # Environment variables available at runtime
+    export HDF5_USE_FILE_LOCKING='FALSE'
+    export DEBIAN_FRONTEND=noninteractive
+
+%runscript
+    # What runs when the container is executed directly
+    # Equivalent to ENTRYPOINT in Dockerfile
+    exec /entrypoint.sh "$@"
+
+%startscript
+    # What runs when the container is started as an instance
+    # Useful if you want persistent services
+    exec /entrypoint.sh "$@"
+
+%labels
+    Author icarovasconcelos@csilab
+    Version 1.0
+    Description "Ambiente RAPIDS do CSILab com Python 3.11 e RAPIDS>=26.02"
+
+%help
+    This is the CSILab RAPIDS container.
+    
+    To run interactively:
+        apptainer run --nv lab.sif bash
+    
+    To execute a specific command:
+        apptainer exec --nv lab.sif python my_script.py
+
+    To see the libraries available (inside the container):
+        pip list
