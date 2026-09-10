@@ -20,7 +20,7 @@ From: ../base/csibase_1.0.sif
     apt-get update
     apt-get install -y build-essential
 
-        # Upgrade pip and install pinned TensorFlow ecosystem
+    # Upgrade pip and install pinned TensorFlow ecosystem
     pip install --no-cache-dir --upgrade pip
     if [ -f /app/requirements.txt ]; then
         pip3 install --no-cache-dir -r /app/requirements.txt

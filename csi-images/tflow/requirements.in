@@ -2,15 +2,13 @@ tensorflow[and-cuda]
 tensorflow-probability
 tensorflow-datasets
 tensorflow-hub
-# Computer Vision & Graph Neural N
-opencv-python-headless
 keras-cv
 spektral
-# Research utilities (as
 tensorflow-addons
 keras-tuner
 tensorflow-model-optimization
 tensorflow-io
 keras-nlp
-mlflow
-pydot
+
+tokenizers<=0.23.0   # satisfies transformers 5.5.4
+protobuf>=4.25.8,<7.0   # satisfies databricks-sdk, but avoid 7.x
